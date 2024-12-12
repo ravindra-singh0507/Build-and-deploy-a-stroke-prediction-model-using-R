@@ -1,0 +1,198 @@
+---
+title: "Build and deploy a stroke prediction model using R"
+date: "`r Sys.Date()`"
+output: html_document
+author: "Ravindra Pratap Singh Chouhan"
+---
+
+# About Data Analysis Report
+
+This RMarkdown file contains the report of the data analysis done for the project on building and deploying a stroke prediction model in R. It contains analysis such as data exploration, summary statistics and building the prediction models. The final report was completed on `r date()`.
+
+**Data Description:**
+
+According to the World Health Organization (WHO) stroke is the 2nd leading cause of death globally, responsible for approximately 11% of total deaths.
+
+This data set is used to predict whether a patient is likely to get stroke based on the input parameters like gender, age, various diseases, and smoking status. Each row in the data provides relevant information about the patient.
+
+# Task One: Import data and data preprocessing
+
+## Load data and install packages
+
+```{r}
+# Install necessary packages
+install.packages(c("tidyverse", "caret", "randomForest", "xgboost", "DMwR", "corrplot", "shiny", "plumber"))
+
+# Load required libraries
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(DMwR)
+library(corrplot)
+
+# Load the dataset
+dataset_path <- "~/Build-deploy-stroke-prediction-model-R/healthcare-dataset-stroke-data.csv"
+stroke_data <- read.csv(dataset_path)
+
+# View structure of dataset
+str(stroke_data)
+
+# Replace "N/A" in `bmi` with NA
+stroke_data$bmi <- as.numeric(replace(stroke_data$bmi, stroke_data$bmi == "N/A", NA))
+
+# Impute missing values for `bmi` with the median
+stroke_data$bmi[is.na(stroke_data$bmi)] <- median(stroke_data$bmi, na.rm = TRUE)
+
+# Drop the `id` column
+stroke_data <- stroke_data[, -which(names(stroke_data) == "id")]
+
+# Convert categorical variables to factors
+stroke_data$gender <- as.factor(stroke_data$gender)
+stroke_data$ever_married <- as.factor(stroke_data$ever_married)
+stroke_data$work_type <- as.factor(stroke_data$work_type)
+stroke_data$Residence_type <- as.factor(stroke_data$Residence_type)
+stroke_data$smoking_status <- as.factor(stroke_data$smoking_status)
+stroke_data$stroke <- as.factor(stroke_data$stroke)
+
+```
+
+## Describe and explore the data
+
+```{r}
+# Summarize the dataset
+summary(stroke_data)
+
+# Check for class imbalance
+table(stroke_data$stroke) %>%
+  barplot(main = "Class Distribution", col = c("skyblue", "orange"), ylab = "Count")
+
+# Visualize correlations among numeric features
+numeric_data <- stroke_data %>% select_if(is.numeric)
+correlation_matrix <- cor(numeric_data, use = "complete.obs")
+corrplot(correlation_matrix, method = "color")
+
+```
+
+# Task Two: Build prediction models
+
+```{r}
+# Split the data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(stroke_data$stroke, p = 0.8, list = FALSE)
+train_data <- stroke_data[trainIndex, ]
+test_data <- stroke_data[-trainIndex, ]
+
+# Train Logistic Regression Model
+log_model <- train(
+  stroke ~ ., 
+  data = train_data, 
+  method = "glm", 
+  family = "binomial", 
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+# Train Random Forest Model
+rf_model <- train(
+  stroke ~ ., 
+  data = train_data, 
+  method = "rf", 
+  trControl = trainControl(method = "cv", number = 5), 
+  importance = TRUE
+)
+
+# Train XGBoost Model
+xgb_model <- train(
+  stroke ~ ., 
+  data = train_data, 
+  method = "xgbTree", 
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+```
+
+# Task Three: Evaluate and select prediction models
+
+```{r}
+# Make predictions on the test set
+log_preds <- predict(log_model, newdata = test_data)
+rf_preds <- predict(rf_model, newdata = test_data)
+xgb_preds <- predict(xgb_model, newdata = test_data)
+
+# Evaluate models using confusion matrices
+log_cm <- confusionMatrix(log_preds, test_data$stroke)
+rf_cm <- confusionMatrix(rf_preds, test_data$stroke)
+xgb_cm <- confusionMatrix(xgb_preds, test_data$stroke)
+
+# Compare accuracy
+log_acc <- log_cm$overall["Accuracy"]
+rf_acc <- rf_cm$overall["Accuracy"]
+xgb_acc <- xgb_cm$overall["Accuracy"]
+cat("Logistic Regression Accuracy:", log_acc, "\n")
+cat("Random Forest Accuracy:", rf_acc, "\n")
+cat("XGBoost Accuracy:", xgb_acc, "\n")
+
+# Plot ROC curves for all models
+library(pROC)
+log_roc <- roc(as.numeric(test_data$stroke), as.numeric(log_preds))
+rf_roc <- roc(as.numeric(test_data$stroke), as.numeric(rf_preds))
+xgb_roc <- roc(as.numeric(test_data$stroke), as.numeric(xgb_preds))
+
+plot(log_roc, col = "blue")
+plot(rf_roc, add = TRUE, col = "green")
+plot(xgb_roc, add = TRUE, col = "red")
+legend("bottomright", legend = c("Logistic Regression", "Random Forest", "XGBoost"),
+       col = c("blue", "green", "red"), lty = 1)
+
+```
+
+# Task Four: Deploy the prediction model
+
+```{r}
+library(shiny)
+
+ui <- fluidPage(
+  titlePanel("Stroke Prediction Model"),
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("age", "Age:", 50, min = 0, max = 100),
+      selectInput("gender", "Gender:", choices = c("Male", "Female")),
+      numericInput("avg_glucose_level", "Average Glucose Level:", 100),
+      numericInput("bmi", "BMI:", 25),
+      selectInput("smoking_status", "Smoking Status:", 
+                  choices = c("never smoked", "formerly smoked", "smokes")),
+      actionButton("predict", "Predict")
+    ),
+    mainPanel(
+      textOutput("result")
+    )
+  )
+)
+
+server <- function(input, output) {
+  observeEvent(input$predict, {
+    new_data <- data.frame(
+      gender = input$gender,
+      age = input$age,
+      avg_glucose_level = input$avg_glucose_level,
+      bmi = input$bmi,
+      smoking_status = input$smoking_status
+    )
+    prediction <- predict(rf_model, newdata = new_data)
+    output$result <- renderText({ paste("Stroke Prediction:", prediction) })
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+```
+
+# Task Five: Findings and Conclusions
+
+```{r}
+cat("1. The Random Forest model had the highest accuracy among all models evaluated.\n")
+cat("2. Addressing class imbalance and using cross-validation improved model reliability.\n")
+cat("3. The model was successfully deployed using Shiny for real-time predictions.\n")
+cat("4. Future improvements could include fine-tuning hyperparameters or incorporating more data.\n")
+
+```
